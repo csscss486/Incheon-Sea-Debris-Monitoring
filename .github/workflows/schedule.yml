@@ -1,0 +1,31 @@
+name: Hourly Ocean Data Collector
+
+on:
+  schedule:
+    # 매시간 5분에 실행 (KST 기준 정시 수집 후 데이터 안정화 시간 고려)
+    - cron: '5 * * * *'
+  workflow_dispatch: # 웹에서 수동으로 테스트 실행할 수 있는 버튼 활성화
+
+jobs:
+  collect-and-upload:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 소스코드 가져오기
+        uses: actions/checkout@v3
+
+      - name: 파이썬 환경 설정
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 라이브러리 패키지 설치
+        run: |
+          pip install -r requirements.txt
+
+      - name: 데이터 수집 및 구글 드라이브 업로드 실행
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
+        run: |
+          python collector.py
