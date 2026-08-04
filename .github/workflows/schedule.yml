@@ -2,8 +2,8 @@ name: Hourly Ocean Data Collector
 
 on:
   schedule:
-    # 매시간 5분에 실행 (KST 기준 정시 수집 후 데이터 안정화 시간 고려)
-    - cron: '5 * * * *'
+    # 매시간 45분에 실행 (KST 기준 정시 수집 후 데이터 안정화 시간 고려)
+    - cron: '45 * * * *'
   workflow_dispatch: # 웹에서 수동으로 테스트 실행할 수 있는 버튼 활성화
 
 jobs:
