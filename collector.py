@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import requests
 from concurrent.futures import ThreadPoolExecutor
 
-from google.oauth2.service_account import Credentials
+from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
@@ -275,68 +275,52 @@ def get_high_resolution_national_ocean_data():
         "ocean_current_geojson": combined_geojson
     }
 
-
-from datetime import datetime
-
 def upload_to_drive(file_path):
-    """구글 드라이브 API를 통해 시간별 고유 파일명으로 업로드 (용량 에러 우회)"""
+    """구글 드라이브 API를 통해 개인 계정(OAuth)으로 업로드"""
     print("\n==================================================")
-    print("📤 [Google Drive] API 업로드 진행 중...")
+    print("📤 [Google Drive] OAuth 업로드 진행 중...")
     
-    service_account_str = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
+    # GitHub Secrets에서 가져올 정보들
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
     folder_id = os.environ.get("DRIVE_FOLDER_ID")
 
-    if not service_account_str or not folder_id:
-        print("⚠️ [경고] 구글 서비스 계정 환경변수가 설정되지 않아 로컬 파일 생성만 완료합니다.")
+    if not all([client_id, client_secret, refresh_token, folder_id]):
+        print("⚠️ [경고] OAuth 또는 드라이브 폴더 환경변수가 설정되지 않아 업로드를 건너뜁니다.")
         return
 
     try:
-        service_account_info = json.loads(service_account_str)
-        creds = Credentials.from_service_account_info(
-            service_account_info,
-            scopes=['https://www.googleapis.com/auth/drive.file']
+        # Refresh Token을 이용해 내 개인 계정 권한 객체 생성
+        creds = Credentials(
+            None,  # access_token은 자동으로 갱신되므로 None 처리
+            refresh_token=refresh_token,
+            client_id=client_id,
+            client_secret=client_secret,
+            token_uri="https://oauth2.googleapis.com/token"
         )
+
         service = build('drive', 'v3', credentials=creds)
 
-        # 1. 현재 시간 기준으로 고유한 파일 이름 생성 (예: ocean_data_2026-08-04_13-25-00.json)
+        # 시간별로 데이터를 누적하고 싶다면 고유한 파일 이름(타임스탬프) 생성
         now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        unique_file_name = f"ocean_data_{now_str}.json"
+        file_name = f"ocean_data_{now_str}.json"
 
-        # 2. 로컬에 있는 기존 수집 파일을 새로운 이름으로 복사하거나, 업로드할 때 이름 변경 적용
-        # (만약 기존에 'ocean_data_latest.json'으로 저장하고 있었다면, 업로드 시 이름을 unique_file_name으로 지정합니다)
         file_metadata = {
-            'name': unique_file_name,
+            'name': file_name,
             'parents': [folder_id]
         }
         
         media = MediaFileUpload(file_path, mimetype='application/json')
 
-        # 3. 매번 다른 이름으로 생성(create)하므로 서비스 계정 용량 에러가 발생하지 않습니다!
+        # 파일 생성 (내 개인 계정 용량을 쓰므로 용량 초과 에러가 발생하지 않습니다!)
         new_file = service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id'
         ).execute()
-        
-        print(f"✅ [성공] 시간별 데이터 파일 업로드 완료! (파일명: {unique_file_name}, ID: {new_file.get('id')})")
+
+        print(f"✅ [성공] 내 드라이브에 파일 업로드 완료! (파일명: {file_name}, ID: {new_file.get('id')})")
 
     except Exception as e:
         print(f"❌ [오류] 구글 드라이브 업로드 실패: {e}")
-
-
-if __name__ == "__main__":
-    start_time = time.time()
-    ocean_data = get_high_resolution_national_ocean_data()
-
-    # 작업 공간 내 JSON 파일로 일단 저장
-    output_filename = "./ocean_data_latest.json"
-    with open(output_filename, "w", encoding="utf-8") as f:
-        json.dump(ocean_data, f, ensure_ascii=False, indent=2)
-    print(f"💾 [완료] 로컬 작업 디렉터리 파일 생성: {output_filename}")
-
-    # 구글 드라이브 업로드 실행
-    upload_to_drive(output_filename)
-
-    elapsed = round(time.time() - start_time, 2)
-    print(f"⏱️ 총 작업 소요 시간: {elapsed}초")
-    print("==================================================")
