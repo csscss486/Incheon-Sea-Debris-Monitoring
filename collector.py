@@ -276,8 +276,10 @@ def get_high_resolution_national_ocean_data():
     }
 
 
+from datetime import datetime
+
 def upload_to_drive(file_path):
-    """구글 드라이브 API를 통해 수집 결과 업로드(덮어쓰기)"""
+    """구글 드라이브 API를 통해 시간별 고유 파일명으로 업로드 (용량 에러 우회)"""
     print("\n==================================================")
     print("📤 [Google Drive] API 업로드 진행 중...")
     
@@ -296,31 +298,28 @@ def upload_to_drive(file_path):
         )
         service = build('drive', 'v3', credentials=creds)
 
-        file_name = os.path.basename(file_path)
-        query = f"'{folder_id}' in parents and name = '{file_name}' and trashed = false"
-        results = service.files().list(q=query, fields="files(id, name)").execute()
-        existing_files = results.get('files', [])
+        # 1. 현재 시간 기준으로 고유한 파일 이름 생성 (예: ocean_data_2026-08-04_13-25-00.json)
+        now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        unique_file_name = f"ocean_data_{now_str}.json"
 
+        # 2. 로컬에 있는 기존 수집 파일을 새로운 이름으로 복사하거나, 업로드할 때 이름 변경 적용
+        # (만약 기존에 'ocean_data_latest.json'으로 저장하고 있었다면, 업로드 시 이름을 unique_file_name으로 지정합니다)
+        file_metadata = {
+            'name': unique_file_name,
+            'parents': [folder_id]
+        }
+        
         media = MediaFileUpload(file_path, mimetype='application/json')
 
-        if existing_files:
-            file_id = existing_files[0]['id']
-            updated_file = service.files().update(
-                fileId=file_id,
-                media_body=media
-            ).execute()
-            print(f"✅ [성공] 기존 파일 덮어쓰기 완료! (ID: {updated_file.get('id')})")
-        else:
-            file_metadata = {
-                'name': file_name,
-                'parents': [folder_id]
-            }
-            new_file = service.files().create(
-                body=file_metadata,
-                media_body=media,
-                fields='id'
-            ).execute()
-            print(f"✅ [성공] 신규 파일 업로드 완료! (ID: {new_file.get('id')})")
+        # 3. 매번 다른 이름으로 생성(create)하므로 서비스 계정 용량 에러가 발생하지 않습니다!
+        new_file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id'
+        ).execute()
+        
+        print(f"✅ [성공] 시간별 데이터 파일 업로드 완료! (파일명: {unique_file_name}, ID: {new_file.get('id')})")
+
     except Exception as e:
         print(f"❌ [오류] 구글 드라이브 업로드 실패: {e}")
 
