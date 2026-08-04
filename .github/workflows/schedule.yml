@@ -1,9 +1,8 @@
 name: Hourly Ocean Data Collector
 
 on:
-  schedule:
-    # 매시간 5분에 실행 (KST 기준 정시 수집 후 데이터 안정화 시간 고려)
-    - cron: '5 * * * *'
+  # 매시간 5분에 실행 (KST 기준 정시 수집 후 데이터 안정화 시간 고려)
+  - cron: '5 * * * *'
   workflow_dispatch: # 웹에서 수동으로 테스트 실행할 수 있는 버튼 활성화
 
 jobs:
@@ -25,7 +24,9 @@ jobs:
 
       - name: 데이터 수집 및 구글 드라이브 업로드 실행
         env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          OAUTH_CLIENT_ID: ${{ secrets.OAUTH_CLIENT_ID }}
+          OAUTH_CLIENT_SECRET: ${{ secrets.OAUTH_CLIENT_SECRET }}
+          OAUTH_REFRESH_TOKEN: ${{ secrets.OAUTH_REFRESH_TOKEN }}
           DRIVE_FOLDER_ID: ${{ secrets.DRIVE_FOLDER_ID }}
         run: |
           python collector.py
