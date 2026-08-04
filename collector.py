@@ -324,3 +324,21 @@ def upload_to_drive(file_path):
 
     except Exception as e:
         print(f"❌ [오류] 구글 드라이브 업로드 실패: {e}")
+
+if __name__ == "__main__":
+    # 1. 데이터 수집 실행
+    collected_data = get_high_resolution_national_ocean_data()
+    
+    # 2. 수집된 데이터를 로컬에 임시 JSON 파일로 저장
+    temp_file_name = "temp_ocean_data.json"
+    with open(temp_file_name, "w", encoding="utf-8") as f:
+        json.dump(collected_data, f, ensure_ascii=False, indent=4)
+    
+    print(f"💾 [로컬] 임시 파일 저장 완료: {temp_file_name}")
+    
+    # 3. 구글 드라이브로 업로드 실행
+    upload_to_drive(temp_file_name)
+    
+    # 4. 업로드가 끝난 뒤 로컬에 남은 임시 파일 삭제 (선택사항)
+    if os.path.exists(temp_file_name):
+        os.remove(temp_file_name)
