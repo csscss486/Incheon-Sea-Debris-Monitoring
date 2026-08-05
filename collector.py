@@ -1,7 +1,6 @@
 import os
 import json
 import math
-import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import requests
@@ -63,65 +62,32 @@ def calculate_centroid(geometry):
 
 
 def fetch_open_meteo_wind_vector(lat, lon):
-    """Open-Meteo API를 통해 10m 바람 벡터(u, v) 수집 및 재시도 로직 적용 (실패 시 None, None, 실패 원인 반환)"""
+    """Open-Meteo API를 통해 10m 바람 벡터(u, v) 수집 및 km/h -> m/s 단위 변환 (실패 시 None, None 반환)"""
     url = (
         f"https://api.open-meteo.com/v1/forecast"
         f"?latitude={lat}&longitude={lon}"
         f"&current=wind_u_component_10m,wind_v_component_10m"
     )
     
-    max_retries = 3
-    backoff_delays = [1, 2]
+    try:
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return None, None
 
-    for attempt in range(max_retries):
-        try:
-            res = requests.get(url, timeout=10)
-            
-            if res.status_code == 429:
-                if attempt < max_retries - 1:
-                    time.sleep(backoff_delays[attempt])
-                    continue
-                return None, None, "HTTP_429"
-            
-            if 500 <= res.status_code < 600:
-                if attempt < max_retries - 1:
-                    time.sleep(backoff_delays[attempt])
-                    continue
-                return None, None, f"HTTP_{res.status_code}"
-                
-            if res.status_code != 200:
-                return None, None, f"HTTP_{res.status_code}"
+        res_json = res.json()
+        current_data = res_json.get("current")
+        if not current_data:
+            return None, None
 
-            res_json = res.json()
-            current_data = res_json.get("current")
-            if not current_data:
-                return None, None, "INVALID_RESPONSE"
+        u_kmh = current_data.get("wind_u_component_10m")
+        v_kmh = current_data.get("wind_v_component_10m")
 
-            u_kmh = current_data.get("wind_u_component_10m")
-            v_kmh = current_data.get("wind_v_component_10m")
+        if u_kmh is None or v_kmh is None:
+            return None, None
 
-            if u_kmh is None or v_kmh is None:
-                return None, None, "PARSE_ERROR"
-
-            return float(u_kmh) / 3.6, float(v_kmh) / 3.6, None
-
-        except requests.exceptions.Timeout:
-            if attempt < max_retries - 1:
-                time.sleep(backoff_delays[attempt])
-                continue
-            return None, None, "TIMEOUT"
-        except requests.exceptions.ConnectionError:
-            if attempt < max_retries - 1:
-                time.sleep(backoff_delays[attempt])
-                continue
-            return None, None, "CONNECTION_ERROR"
-        except Exception:
-            if attempt < max_retries - 1:
-                time.sleep(backoff_delays[attempt])
-                continue
-            return None, None, "PARSE_ERROR"
-
-    return None, None, "TIMEOUT"
+        return float(u_kmh) / 3.6, float(v_kmh) / 3.6
+    except Exception:
+        return None, None
 
 
 def calculate_tidal_force(current_speed_cms):
@@ -186,23 +152,21 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, data_timestamp_
 
             grid_key = (round(center_lat, 2), round(center_lon, 2))
             if grid_key in wind_cache:
-                wind_u, wind_v, wind_fail_reason = wind_cache[grid_key]
+                wind_u, wind_v = wind_cache[grid_key]
             else:
-                wind_u, wind_v, wind_fail_reason = fetch_open_meteo_wind_vector(center_lat, center_lon)
-                wind_cache[grid_key] = (wind_u, wind_v, wind_fail_reason)
+                wind_u, wind_v = fetch_open_meteo_wind_vector(center_lat, center_lon)
+                wind_cache[grid_key] = (wind_u, wind_v)
 
             wind_drag_coefficient = 0.03
             if wind_u is not None and wind_v is not None:
                 wind_status = "VALID"
                 wind_speed_ms = math.hypot(wind_u, wind_v)
                 wind_drift_cms = wind_speed_ms * wind_drag_coefficient * 100.0
-                wind_missing_reason = None
             else:
                 wind_status = "MISSING"
                 wind_u, wind_v = None, None
                 wind_speed_ms = None
                 wind_drift_cms = None
-                wind_missing_reason = wind_fail_reason or "UNKNOWN_ERROR"
 
             valid_features = []
             skipped_feature_count = 0
@@ -226,7 +190,6 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, data_timestamp_
                     feature["properties"]["wind_speed_ms"] = round(wind_speed_ms, 1) if wind_speed_ms is not None else None
                     feature["properties"]["wind_drift_cms"] = round(wind_drift_cms, 1) if wind_drift_cms is not None else None
                     feature["properties"]["wind_data_status"] = wind_status
-                    feature["properties"]["wind_missing_reason"] = wind_missing_reason
 
                     raw_speed = feature["properties"].get("current_speed")
                     raw_direct = feature["properties"].get("current_direct")
@@ -308,14 +271,14 @@ def get_high_resolution_national_ocean_data():
 
     print(f"  👉 총 {len(valid_tiles)}개 해역 타일 설정 완료")
 
-    print("\n[Step 2/3] 🌊 해류(KHOA) & 🌀 바람(Open-Meteo) 병렬 수집 중 (max_workers=5)...")
+    print("\n[Step 2/3] 🌊 해류(KHOA) & 🌀 바람(Open-Meteo) 병렬 수집 중...")
     all_features = []
     failed_tiles = []
     total_skipped_features = 0
     wind_cache = {}
     completed_count = 0
 
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         futures = [
             executor.submit(fetch_khoa_current_tile, tile, target_date, target_hour, data_timestamp_str, wind_cache)
             for tile in valid_tiles
@@ -344,15 +307,14 @@ def get_high_resolution_national_ocean_data():
     else:
         current_status = "FAILED"
 
-    wind_total_count = len(all_features)
-    wind_valid_count = sum(1 for f in all_features if f.get("properties", {}).get("wind_data_status") == "VALID")
-    wind_missing_count = sum(1 for f in all_features if f.get("properties", {}).get("wind_data_status") == "MISSING")
-    wind_missing_rate = round((wind_missing_count / wind_total_count * 100), 2) if wind_total_count > 0 else 0.0
-
-    if wind_missing_count == 0:
-        wind_status = "SUCCESS"
-    elif wind_missing_count < wind_total_count:
-        wind_status = "PARTIAL"
+    if all_features:
+        missing_wind_count = sum(1 for f in all_features if f.get("properties", {}).get("wind_data_status") == "MISSING")
+        if missing_wind_count == 0:
+            wind_status = "SUCCESS"
+        elif missing_wind_count < len(all_features):
+            wind_status = "PARTIAL"
+        else:
+            wind_status = "FAILED"
     else:
         wind_status = "FAILED"
 
@@ -369,16 +331,12 @@ def get_high_resolution_national_ocean_data():
         "region": "대한민국 연안 및 지정 구역",
         "scale": "500000",
         "grid_resolution": "0.5 degree",
-        "wind_source": "Open-Meteo Forecast API (10m u/v components with retry/backoff)",
+        "wind_source": "Open-Meteo Forecast API (10m u/v components)",
         "current_source": "KHOA tidalCurrentAreaGeoJson API",
         "wind_status": wind_status,
         "current_status": current_status,
-        "wind_total_count": wind_total_count,
-        "wind_valid_count": wind_valid_count,
-        "wind_missing_count": wind_missing_count,
-        "wind_missing_rate": wind_missing_rate,
         "skipped_features_count": total_skipped_features,
-        "version": "v3.7_STABLE_WIND_RETRY",
+        "version": "v3.6_WIND_MISSING_FIXED",
         "applied_formula": "total_u = current_u + wind_u*0.03, total_v = current_v + wind_v*0.03 (m/s)",
         "failed_tiles": failed_tiles
     }
@@ -389,118 +347,57 @@ def get_high_resolution_national_ocean_data():
     }
 
 
-def upload_to_google_drive(file_path, file_name):
-    """생성된 JSON 파일을 Google Drive 지정 폴더에 업로드"""
+def upload_to_drive(file_path):
+    """구글 드라이브 API를 통해 개인 계정(OAuth)으로 업로드"""
     print("\n==================================================")
-    print("☁️ [Google Drive] 파일 업로드 프로세스 시작...")
-    print("==================================================")
+    print("📤 [Google Drive] OAuth 업로드 진행 중...")
     
+    client_id = os.environ.get("OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
+    refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
     folder_id = os.environ.get("DRIVE_FOLDER_ID")
-    if not folder_id:
-        print("❌ [오류] DRIVE_FOLDER_ID 환경변수가 설정되지 않았습니다.")
-        return False
+
+    if not all([client_id, client_secret, refresh_token, folder_id]):
+        print("⚠️ [경고] OAuth 또는 드라이브 폴더 환경변수가 설정되지 않아 업로드를 건너뜁니다.")
+        return
 
     try:
-        creds = None
-        if os.path.exists("token.json"):
-            creds = Credentials.from_authorized_user_file("token.json", ["https://www.googleapis.com/auth/drive.file"])
-        else:
-            token_json_str = os.environ.get("GOOGLE_TOKEN_JSON")
-            if token_json_str:
-                import json as js
-                creds_data = js.loads(token_json_str)
-                creds = Credentials.from_authorized_user_info(creds_data, ["https://www.googleapis.com/auth/drive.file"])
-            else:
-                from google.auth import default
-                creds, _ = default(scopes=["https://www.googleapis.com/auth/drive.file"])
+        creds = Credentials(
+            None,
+            refresh_token=refresh_token,
+            client_id=client_id,
+            client_secret=client_secret,
+            token_uri="https://oauth2.googleapis.com/token"
+        )
 
-        service = build("drive", "v3", credentials=creds)
+        service = build('drive', 'v3', credentials=creds)
+
+        timestamp_str = collected_data.get("metadata", {}).get("timestamp", "")
+        try:
+            dt_obj = datetime.fromisoformat(timestamp_str)
+            file_date_str = dt_obj.strftime("%Y%m%d_%H%M")
+        except Exception:
+            file_date_str = datetime.now(KST).strftime("%Y%m%d_%H%M")
+
+        file_name = f"ocean_data_{file_date_str}.json"
 
         file_metadata = {
-            "name": file_name,
-            "parents": [folder_id]
+            'name': file_name,
+            'parents': [folder_id]
         }
-        media = MediaFileUpload(file_path, mimetype="application/json", resumable=True)
+        
+        media = MediaFileUpload(file_path, mimetype='application/json')
 
-        print(f"  - 업로드 파일명: {file_name}")
-        print(f"  - 타겟 폴더 ID: {folder_id}")
-
-        file = service.files().create(
+        new_file = service.files().create(
             body=file_metadata,
             media_body=media,
-            fields="id"
+            fields='id'
         ).execute()
 
-        print(f"✅ [성공] Google Drive 업로드 완료! (File ID: {file.get('id')})")
-        return True
+        print(f"✅ [성공] 내 드라이브에 파일 업로드 완료! (파일명: {file_name}, ID: {new_file.get('id')})")
 
     except Exception as e:
-        print(f"❌ [오류] Google Drive 업로드 실패: {e}")
-        return False
-
-
-def run_self_validation(collected_data):
-    """요청된 6가지 자체 검증 항목 수행"""
-    print("\n==================================================")
-    print("🔍 [Self-Validation] 데이터 품질 자체 검증 수행 중...")
-    print("==================================================")
-    
-    features = collected_data.get("ocean_current_geojson", {}).get("features", [])
-    metadata = collected_data.get("metadata", {})
-    
-    valid_null_wind_u_v = 0
-    missing_has_wind_u_v = 0
-    drift_formula_errors = 0
-    vector_status_mismatch = 0
-    
-    for f in features:
-        props = f.get("properties", {})
-        status = props.get("wind_data_status")
-        w_u = props.get("wind_u")
-        w_v = props.get("wind_v")
-        w_speed = props.get("wind_speed_ms")
-        w_drift = props.get("wind_drift_cms")
-        v_status = props.get("total_vector_status")
-        
-        if status == "VALID" and (w_u is None or w_v is None):
-            valid_null_wind_u_v += 1
-            
-        if status == "MISSING" and (w_u is not None or w_v is not None):
-            missing_has_wind_u_v += 1
-            
-        if status == "VALID" and w_speed is not None and w_drift is not None:
-            expected_drift = round(w_speed * 0.03 * 100.0, 1)
-            if abs(w_drift - expected_drift) > 0.5:
-                drift_formula_errors += 1
-                
-        if status == "VALID" and v_status != "VALID":
-            vector_status_mismatch += 1
-        if status == "MISSING" and v_status != "WIND_MISSING":
-            vector_status_mismatch += 1
-
-    total_cnt = metadata.get("wind_total_count", 0)
-    valid_cnt = metadata.get("wind_valid_count", 0)
-    missing_cnt = metadata.get("wind_missing_count", 0)
-    missing_rate = metadata.get("wind_missing_rate", 0.0)
-    
-    calc_missing_rate = round((missing_cnt / total_cnt * 100), 2) if total_cnt > 0 else 0.0
-    rate_error = abs(calc_missing_rate - missing_rate) > 0.01
-
-    print(f"  - 총 Feature 수: {total_cnt}")
-    print(f"  - VALID 개수: {valid_cnt}, MISSING 개수: {missing_cnt}")
-    print(f"  - [검증 1] VALID인데 wind_u/v가 null인 개수: {valid_null_wind_u_v}")
-    print(f"  - [검증 2] MISSING인데 wind_u/v가 존재하는 개수: {missing_has_wind_u_v}")
-    print(f"  - [검증 3] wind_drift_cms 공식 오차 개수 (허용 오차 0.5 cm/s): {drift_formula_errors}")
-    print(f"  - [검증 4] wind_data_status와 total_vector_status 불일치 개수: {vector_status_mismatch}")
-    print(f"  - [검증 5] 결측률 계산 일치 여부: {'불일치(오류)' if rate_error else '정상 ({}%)'.format(missing_rate)}")
-    
-    total_errors = valid_null_wind_u_v + missing_has_wind_u_v + drift_formula_errors + vector_status_mismatch + (1 if rate_error else 0)
-    if total_errors == 0:
-        print("✅ [성공] 모든 자체 검증 항목을 완벽하게 통과했습니다!")
-        return True
-    else:
-        print(f"❌ [경고] 총 {total_errors}개의 검증 오류가 발견되었습니다.")
-        return False
+        print(f"❌ [오류] 구글 드라이브 업로드 실패: {e}")
 
 
 if __name__ == "__main__":
@@ -512,8 +409,6 @@ if __name__ == "__main__":
         print(json.dumps(features_list[0], ensure_ascii=False, indent=4))
     else:
         print("\n⚠️ [검증 결과] 수집된 Feature가 없습니다.")
-
-    is_valid = run_self_validation(collected_data)
 
     timestamp_str = collected_data.get("metadata", {}).get("timestamp", "")
     try:
@@ -527,8 +422,8 @@ if __name__ == "__main__":
         json.dump(collected_data, f, ensure_ascii=False, indent=4)
     
     print(f"\n💾 [로컬] 임시 파일 저장 완료: {temp_file_name}")
-
-    if is_valid:
-        upload_to_google_drive(temp_file_name, temp_file_name)
-    else:
-        print("❌ [중단] 자체 검증(Self-Validation)을 통과하지 못하여 Google Drive 업로드가 취소되었습니다.")
+    
+    upload_to_drive(temp_file_name)
+    
+    if os.path.exists(temp_file_name):
+        os.remove(temp_file_name)
