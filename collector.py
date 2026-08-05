@@ -142,11 +142,11 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, data_timestamp_
             if "errorCode" in data or "resultCode" in data:
                 err_code = data.get("errorCode") or data.get("resultCode")
                 if str(err_code) not in ["0", "00", "NORMAL", "SUCCESS"]:
-                    return [], {"tile": tile_info, "reason": f"API_INTERNAL_ERROR_{err_code}"}
+                    return [], {"tile": tile_info, "reason": f"API_INTERNAL_ERROR_{err_code}"}, 0
 
             raw_features = data.get("features", [])
             if not raw_features and ("result" in data and data.get("result") == "error"):
-                return [], {"tile": tile_info, "reason": "API_RESULT_ERROR_FIELD"}
+                return [], {"tile": tile_info, "reason": "API_RESULT_ERROR_FIELD"}, 0
 
             center_lat = (cur_y + next_y) / 2.0
             center_lon = (cur_x + next_x) / 2.0
@@ -165,9 +165,9 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, data_timestamp_
                 wind_drift_cms = wind_speed_ms * wind_drag_coefficient * 100.0
             else:
                 wind_status = "MISSING"
-                wind_u, wind_v = 0.0, 0.0
-                wind_speed_ms = 0.0
-                wind_drift_cms = 0.0
+                wind_u, wind_v = None, None
+                wind_speed_ms = None
+                wind_drift_cms = None
 
             valid_features = []
             skipped_feature_count = 0
@@ -189,8 +189,8 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, data_timestamp_
                     
                     feature["properties"]["wind_u"] = round(wind_u, 3) if wind_status == "VALID" else None
                     feature["properties"]["wind_v"] = round(wind_v, 3) if wind_status == "VALID" else None
-                    feature["properties"]["wind_speed_ms"] = round(wind_speed_ms, 1)
-                    feature["properties"]["wind_drift_cms"] = round(wind_drift_cms, 1)
+                    feature["properties"]["wind_speed_ms"] = round(wind_speed_ms, 1) if wind_speed_ms is not None else None
+                    feature["properties"]["wind_drift_cms"] = round(wind_drift_cms, 1) if wind_drift_cms is not None else None
                     feature["properties"]["wind_data_status"] = wind_status
 
                     raw_speed = feature["properties"].get("current_speed")
@@ -204,11 +204,14 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, data_timestamp_
                     feature["properties"]["current_v"] = current_v
                     
                     if current_u is not None and current_v is not None:
-                        effective_wind_u = wind_u if wind_status == "VALID" else 0.0
-                        effective_wind_v = wind_v if wind_status == "VALID" else 0.0
-                        
-                        total_u = current_u + effective_wind_u * wind_drag_coefficient
-                        total_v = current_v + effective_wind_v * wind_drag_coefficient
+                        if wind_status == "VALID":
+                            total_u = current_u + wind_u * wind_drag_coefficient
+                            total_v = current_v + wind_v * wind_drag_coefficient
+                            feature["properties"]["total_vector_status"] = "VALID"
+                        else:
+                            total_u = current_u
+                            total_v = current_v
+                            feature["properties"]["total_vector_status"] = "WIND_MISSING"
                         
                         feature["properties"]["total_u"] = round(total_u, 3)
                         feature["properties"]["total_v"] = round(total_v, 3)
@@ -227,6 +230,7 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, data_timestamp_
                         feature["properties"]["total_current_speed"] = None
                         feature["properties"]["total_current_direction"] = None
                         feature["properties"]["tidal_force"] = None
+                        feature["properties"]["total_vector_status"] = "WIND_MISSING" if wind_status == "MISSING" else "VALID"
 
                     valid_features.append(feature)
                 except Exception:
@@ -335,7 +339,7 @@ def get_high_resolution_national_ocean_data():
         "wind_status": wind_status,
         "current_status": current_status,
         "skipped_features_count": total_skipped_features,
-        "version": "v3.5_STABILIZED_PIPELINE",
+        "version": "v3.6_WIND_MISSING_FIXED",
         "applied_formula": "total_u = current_u + wind_u*0.03, total_v = current_v + wind_v*0.03 (m/s)",
         "failed_tiles": failed_tiles
     }
