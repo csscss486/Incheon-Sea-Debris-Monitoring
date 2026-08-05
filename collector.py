@@ -395,9 +395,9 @@ def upload_to_google_drive(file_path, file_name):
     print("☁️ [Google Drive] 파일 업로드 프로세스 시작...")
     print("==================================================")
     
-    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    folder_id = os.environ.get("DRIVE_FOLDER_ID")
     if not folder_id:
-        print("❌ [오류] GOOGLE_DRIVE_FOLDER_ID 환경변수가 설정되지 않았습니다.")
+        print("❌ [오류] DRIVE_FOLDER_ID 환경변수가 설정되지 않았습니다.")
         return False
 
     try:
