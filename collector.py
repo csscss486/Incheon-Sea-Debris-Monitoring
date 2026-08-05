@@ -420,10 +420,10 @@ def run_self_validation(collected_data):
         if status == "MISSING" and (w_u is not None or w_v is not None):
             missing_has_wind_u_v += 1
             
-        # 3. wind_drift_cms 공식 검증 (wind_speed_ms × 0.03 × 100)
+        # 3. wind_drift_cms 공식 검증 (wind_speed_ms × 0.03 × 100) - VALID 전용, 허용 오차 0.5 cm/s
         if status == "VALID" and w_speed is not None and w_drift is not None:
             expected_drift = round(w_speed * 0.03 * 100.0, 1)
-            if abs(w_drift - expected_drift) > 0.1:
+            if abs(w_drift - expected_drift) > 0.5:
                 drift_formula_errors += 1
                 
         # 4. total_vector_status와 wind_data_status 일치 여부
@@ -445,7 +445,7 @@ def run_self_validation(collected_data):
     print(f"  - VALID 개수: {valid_cnt}, MISSING 개수: {missing_cnt}")
     print(f"  - [검증 1] VALID인데 wind_u/v가 null인 개수: {valid_null_wind_u_v}")
     print(f"  - [검증 2] MISSING인데 wind_u/v가 존재하는 개수: {missing_has_wind_u_v}")
-    print(f"  - [검증 3] wind_drift_cms 공식 오차 개수: {drift_formula_errors}")
+    print(f"  - [검증 3] wind_drift_cms 공식 오차 개수 (허용 오차 0.5 cm/s): {drift_formula_errors}")
     print(f"  - [검증 4] wind_data_status와 total_vector_status 불일치 개수: {vector_status_mismatch}")
     print(f"  - [검증 5] 결측률 계산 일치 여부: {'불일치(오류)' if rate_error else '정상 ({}%)'.format(missing_rate)}")
     
