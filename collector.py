@@ -141,6 +141,21 @@ def calculate_tidal_force(current_speed_cms):
     return round(0.5 * seawater_density * (speed_ms ** 3), 3)
 
 
+def convert_current_to_uv(speed_cms, direction_deg):
+    """조류 속도(cm/s)와 방향(도)을 u, v 성분(m/s)으로 변환"""
+    # 결측치(None) 처리: 방향이나 속도 값이 없으면 None 반환
+    if speed_cms is None or direction_deg is None:
+        return None, None
+    
+    speed_ms = float(speed_cms) / 100.0
+    theta = math.radians(float(direction_deg))
+    
+    u = speed_ms * math.sin(theta)
+    v = speed_ms * math.cos(theta)
+    
+    return round(u, 3), round(v, 3)
+
+
 def fetch_khoa_current_tile(tile_info, target_date, target_hour, wind_cache=None):
     """격자 타일별 해류 데이터 수집 및 기상청 바람 데이터 매핑"""
     cur_x, cur_y, region_name, step_deg = tile_info
@@ -197,10 +212,32 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, wind_cache=None
                 feature["properties"]["wind_speed_ms"] = round(wind_ms, 1)
                 feature["properties"]["wind_drift_cms"] = round(wind_drift_cms, 1)
 
-                raw_current_speed = float(feature["properties"].get("current_speed", 0.0))
-                total_current_speed = round(raw_current_speed + wind_drift_cms, 1)
-                feature["properties"]["total_current_speed"] = total_current_speed
-                feature["properties"]["tidal_force"] = calculate_tidal_force(total_current_speed)
+                # 결측치가 있을 수 있으므로 .get() 사용 후 형변환 (기본값 제외)
+                raw_speed = feature["properties"].get("current_speed")
+                raw_direct = feature["properties"].get("current_direct")
+                
+                speed_val = float(raw_speed) if raw_speed is not None else None
+                direct_val = float(raw_direct) if raw_direct is not None else None
+                
+                current_u, current_v = convert_current_to_uv(speed_val, direct_val)
+                
+                feature["properties"]["current_u"] = current_u
+                feature["properties"]["current_v"] = current_v
+                # 원본 정밀도 보존을 위해 current_speed, current_direct 필드 덮어쓰기 로직 제거
+
+                # [임시 계산] 현재 total_current_speed 값은 방향을 고려하지 않은 스칼라 합산으로, 기존 호환성을 위한 임시 값입니다.
+                # 실제 이동 시뮬레이션에서는 사용하지 않습니다.
+                # 향후 조류 u/v와 바람 u/v를 이용한 벡터 합산 방식으로 교체해야 합니다.
+                # 향후 목표 방식:
+                # total_u = current_u + wind_u * wind_drag_coefficient
+                # total_v = current_v + wind_v * wind_drag_coefficient
+                if speed_val is not None:
+                    total_current_speed = round(speed_val + wind_drift_cms, 1)
+                    feature["properties"]["total_current_speed"] = total_current_speed
+                    feature["properties"]["tidal_force"] = calculate_tidal_force(total_current_speed)
+                else:
+                    feature["properties"]["total_current_speed"] = None
+                    feature["properties"]["tidal_force"] = None
 
             return features
     except Exception:
@@ -269,8 +306,8 @@ def get_high_resolution_national_ocean_data():
             "query_time": now.strftime("%Y-%m-%d %H:00 (KST)"),
             "region": "대한민국 연안 및 지정 구역",
             "scale": "500000",
-            "version": "v2.0_HTTPS_FIXED",
-            "applied_formula": "total_current_speed (cm/s) = current_current_speed + (wind_speed_ms * 0.03 * 100)"
+            "version": "v2.1.1_VECTOR_FIXES",
+            "applied_formula": "u = speed * sin(theta), v = speed * cos(theta)"
         },
         "ocean_current_geojson": combined_geojson
     }
