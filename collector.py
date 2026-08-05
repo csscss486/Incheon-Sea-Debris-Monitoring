@@ -13,49 +13,8 @@ from googleapiclient.http import MediaFileUpload
 
 # 서비스 키 세팅
 KHOA_SERVICE_KEY = "8irtL4rkM7JdnNoeZZEOg=="
-KMA_RAW_SERVICE_KEY = "NnwfsETyAYJ%2BZPmMISPD6Vnc63I22ZUSIXLnOaETFkmk1zvUMboPx3u54B8O5V%2F4WUS23Zlljnl3NVjuqrqXKg%3D%3D"
 
 KST = ZoneInfo("Asia/Seoul")
-
-
-def convert_grid(lat, lon):
-    """위경도(lat, lon) 좌표를 기상청 투영 격자(nx, ny) 좌표로 변환"""
-    RE = 6371.00877
-    GRID = 5.0
-    SLAT1 = 30.0
-    SLAT2 = 60.0
-    OLON = 126.0
-    OLAT = 38.0
-    XO = 43
-    YO = 136
-
-    DEGRAD = math.pi / 180.0
-
-    re = RE / GRID
-    slat1 = SLAT1 * DEGRAD
-    slat2 = SLAT2 * DEGRAD
-    olon = OLON * DEGRAD
-    olat = OLAT * DEGRAD
-
-    sn = math.tan(math.pi * 0.25 + slat2 * 0.5) / math.tan(math.pi * 0.25 + slat1 * 0.5)
-    sn = math.log(math.cos(slat1) / math.cos(slat2)) / math.log(sn)
-    sf = math.tan(math.pi * 0.25 + slat1 * 0.5)
-    sf = (math.pow(sf, sn) * math.cos(slat1)) / sn
-    ro = math.tan(math.pi * 0.25 + olat * 0.5)
-    ro = (re * sf) / math.pow(ro, sn)
-
-    ra = math.tan(math.pi * 0.25 + (lat) * DEGRAD * 0.5)
-    ra = (re * sf) / math.pow(ra, sn)
-    theta = lon * DEGRAD - olon
-    if theta > math.pi:
-        theta -= 2.0 * math.pi
-    if theta < -math.pi:
-        theta += 2.0 * math.pi
-    theta *= sn
-
-    nx = int(math.floor(ra * math.sin(theta) + XO + 0.5))
-    ny = int(math.floor(ro - ra * math.cos(theta) + YO + 0.5))
-    return nx, ny
 
 
 def classify_region(cur_x, cur_y):
@@ -101,35 +60,44 @@ def calculate_centroid(geometry):
     return None, None
 
 
-def fetch_kma_realtime_wind(nx, ny):
-    """기상청 초단기실황 API를 통해 실시간 풍속(WSD, m/s) 수집"""
-    now = datetime.now(KST)
-    if now.minute < 40:
-        now = now - timedelta(hours=1)
-
-    base_date = now.strftime("%Y%m%d")
-    base_time = now.strftime("%H00")
-
+def fetch_open_meteo_wind_vector(lat, lon):
+    """Open-Meteo API를 통해 10m 바람 벡터(u, v) 수집 및 km/h -> m/s 단위 변환"""
     url = (
-        f"https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst"
-        f"?serviceKey={KMA_RAW_SERVICE_KEY}"
-        f"&pageNo=1&numOfRows=10&dataType=JSON"
-        f"&base_date={base_date}&base_time={base_time}"
-        f"&nx={nx}&ny={ny}"
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        f"&current=wind_u_component_10m,wind_v_component_10m"
     )
-
+    
     try:
         res = requests.get(url, timeout=10)
-        if res.status_code == 200:
-            res_json = res.json()
-            items = res_json.get("response", {}).get("body", {}).get("items", {}).get("item", [])
-            for item in items:
-                if item.get("category") == "WSD":
-                    return float(item.get("obsrValue", 0.0))
-    except Exception:
+        if res.status_code != 200:
+            print(f"⚠️ [경고] Open-Meteo HTTP 요청 실패 (Lat: {lat}, Lon: {lon}, Status: {res.status_code})")
+            return 0.0, 0.0
+
+        res_json = res.json()
+        current_data = res_json.get("current")
+        if not current_data:
+            print(f"⚠️ [경고] Open-Meteo 응답 JSON에 'current' 데이터 없음 (Lat: {lat}, Lon: {lon})")
+            return 0.0, 0.0
+
+        u_kmh = current_data.get("wind_u_component_10m")
+        v_kmh = current_data.get("wind_v_component_10m")
+
+        if u_kmh is None or v_kmh is None:
+            print(f"⚠️ [경고] Open-Meteo 응답에 wind_u_component_10m 또는 wind_v_component_10m 누락 (Lat: {lat}, Lon: {lon})")
+            return 0.0, 0.0
+
+        # km/h 단위를 m/s로 변환 (m/s = km/h / 3.6)
+        u_ms = float(u_kmh) / 3.6
+        v_ms = float(v_kmh) / 3.6
+
+        return u_ms, v_ms
+
+    except Exception as e:
+        print(f"❌ [오류] Open-Meteo API 요청 중 예외 발생 (Lat: {lat}, Lon: {lon}): {e}")
         pass
 
-    return 0.0
+    return 0.0, 0.0
 
 
 def calculate_tidal_force(current_speed_cms):
@@ -143,7 +111,6 @@ def calculate_tidal_force(current_speed_cms):
 
 def convert_current_to_uv(speed_cms, direction_deg):
     """조류 속도(cm/s)와 방향(도)을 u, v 성분(m/s)으로 변환"""
-    # 결측치(None) 처리: 방향이나 속도 값이 없으면 None 반환
     if speed_cms is None or direction_deg is None:
         return None, None
     
@@ -157,7 +124,7 @@ def convert_current_to_uv(speed_cms, direction_deg):
 
 
 def fetch_khoa_current_tile(tile_info, target_date, target_hour, wind_cache=None):
-    """격자 타일별 해류 데이터 수집 및 기상청 바람 데이터 매핑"""
+    """격자 타일별 해류 데이터 수집 및 Open-Meteo 바람 데이터 매핑, 벡터 합산"""
     cur_x, cur_y, region_name, step_deg = tile_info
     next_x = min(cur_x + step_deg, 132.0)
     next_y = min(cur_y + step_deg, 38.5)
@@ -186,16 +153,17 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, wind_cache=None
 
             center_lat = (cur_y + next_y) / 2.0
             center_lon = (cur_x + next_x) / 2.0
-            nx, ny = convert_grid(center_lat, center_lon)
 
-            grid_key = (nx, ny)
+            grid_key = (round(center_lat, 2), round(center_lon, 2))
             if grid_key in wind_cache:
-                wind_ms = wind_cache[grid_key]
+                wind_u, wind_v = wind_cache[grid_key]
             else:
-                wind_ms = fetch_kma_realtime_wind(nx, ny)
-                wind_cache[grid_key] = wind_ms
+                wind_u, wind_v = fetch_open_meteo_wind_vector(center_lat, center_lon)
+                wind_cache[grid_key] = (wind_u, wind_v)
 
-            wind_drift_cms = wind_ms * 0.03 * 100.0
+            wind_drag_coefficient = 0.03
+            wind_speed_ms = math.hypot(wind_u, wind_v)
+            wind_drift_cms = wind_speed_ms * wind_drag_coefficient * 100.0
 
             for feature in features:
                 geometry = feature.get("geometry", {})
@@ -207,36 +175,45 @@ def fetch_khoa_current_tile(tile_info, target_date, target_hour, wind_cache=None
                     feature["properties"]["lon"] = round(lon, 5)
 
                 feature["properties"]["region"] = region_name
-                feature["properties"]["nx"] = nx
-                feature["properties"]["ny"] = ny
-                feature["properties"]["wind_speed_ms"] = round(wind_ms, 1)
+                
+                # 바람 성분 저장 (m/s 단위)
+                feature["properties"]["wind_u"] = round(wind_u, 3)
+                feature["properties"]["wind_v"] = round(wind_v, 3)
+                feature["properties"]["wind_speed_ms"] = round(wind_speed_ms, 1)
                 feature["properties"]["wind_drift_cms"] = round(wind_drift_cms, 1)
 
-                # 결측치가 있을 수 있으므로 .get() 사용 후 형변환 (기본값 제외)
                 raw_speed = feature["properties"].get("current_speed")
                 raw_direct = feature["properties"].get("current_direct")
                 
                 speed_val = float(raw_speed) if raw_speed is not None else None
                 direct_val = float(raw_direct) if raw_direct is not None else None
                 
+                # 조류 벡터 u, v 변환 및 저장
                 current_u, current_v = convert_current_to_uv(speed_val, direct_val)
-                
                 feature["properties"]["current_u"] = current_u
                 feature["properties"]["current_v"] = current_v
-                # 원본 정밀도 보존을 위해 current_speed, current_direct 필드 덮어쓰기 로직 제거
-
-                # [임시 계산] 현재 total_current_speed 값은 방향을 고려하지 않은 스칼라 합산으로, 기존 호환성을 위한 임시 값입니다.
-                # 실제 이동 시뮬레이션에서는 사용하지 않습니다.
-                # 향후 조류 u/v와 바람 u/v를 이용한 벡터 합산 방식으로 교체해야 합니다.
-                # 향후 목표 방식:
-                # total_u = current_u + wind_u * wind_drag_coefficient
-                # total_v = current_v + wind_v * wind_drag_coefficient
-                if speed_val is not None:
-                    total_current_speed = round(speed_val + wind_drift_cms, 1)
-                    feature["properties"]["total_current_speed"] = total_current_speed
-                    feature["properties"]["tidal_force"] = calculate_tidal_force(total_current_speed)
+                
+                # 조류와 바람의 최종 벡터 합산 (m/s)
+                if current_u is not None and current_v is not None:
+                    total_u = current_u + wind_u * wind_drag_coefficient
+                    total_v = current_v + wind_v * wind_drag_coefficient
+                    
+                    feature["properties"]["total_u"] = round(total_u, 3)
+                    feature["properties"]["total_v"] = round(total_v, 3)
+                    
+                    total_speed_ms = math.hypot(total_u, total_v)
+                    total_speed_cms = round(total_speed_ms * 100.0, 1)
+                    feature["properties"]["total_current_speed"] = total_speed_cms
+                    
+                    total_dir_deg = round(math.degrees(math.atan2(total_u, total_v)) % 360, 1)
+                    feature["properties"]["total_current_direction"] = total_dir_deg
+                    
+                    feature["properties"]["tidal_force"] = calculate_tidal_force(total_speed_cms)
                 else:
+                    feature["properties"]["total_u"] = None
+                    feature["properties"]["total_v"] = None
                     feature["properties"]["total_current_speed"] = None
+                    feature["properties"]["total_current_direction"] = None
                     feature["properties"]["tidal_force"] = None
 
             return features
@@ -273,7 +250,7 @@ def get_high_resolution_national_ocean_data():
     print(f"  👉 총 {len(valid_tiles)}개 해역 타일 설정 완료")
 
     # 2. 병렬 데이터 수집 실행
-    print("\n[Step 2/3] 🌊 해류(KHOA) & 🌀 바람(KMA HTTPS) 병렬 수집 중...")
+    print("\n[Step 2/3] 🌊 해류(KHOA) & 🌀 바람(Open-Meteo KM/H -> M/S) 병렬 수집 중...")
     all_features = []
     wind_cache = {}
     completed_count = 0
@@ -306,18 +283,18 @@ def get_high_resolution_national_ocean_data():
             "query_time": now.strftime("%Y-%m-%d %H:00 (KST)"),
             "region": "대한민국 연안 및 지정 구역",
             "scale": "500000",
-            "version": "v2.1.1_VECTOR_FIXES",
-            "applied_formula": "u = speed * sin(theta), v = speed * cos(theta)"
+            "version": "v3.1_OPEN_METEO_KMH_FIX",
+            "applied_formula": "wind_ms = wind_kmh / 3.6, total_u = current_u + wind_u*0.03"
         },
         "ocean_current_geojson": combined_geojson
     }
+
 
 def upload_to_drive(file_path):
     """구글 드라이브 API를 통해 개인 계정(OAuth)으로 업로드"""
     print("\n==================================================")
     print("📤 [Google Drive] OAuth 업로드 진행 중...")
     
-    # GitHub Secrets에서 가져올 정보들
     client_id = os.environ.get("OAUTH_CLIENT_ID")
     client_secret = os.environ.get("OAUTH_CLIENT_SECRET")
     refresh_token = os.environ.get("OAUTH_REFRESH_TOKEN")
@@ -328,9 +305,8 @@ def upload_to_drive(file_path):
         return
 
     try:
-        # Refresh Token을 이용해 내 개인 계정 권한 객체 생성
         creds = Credentials(
-            None,  # access_token은 자동으로 갱신되므로 None 처리
+            None,
             refresh_token=refresh_token,
             client_id=client_id,
             client_secret=client_secret,
@@ -339,7 +315,6 @@ def upload_to_drive(file_path):
 
         service = build('drive', 'v3', credentials=creds)
 
-        # 시간별로 데이터를 누적하고 싶다면 고유한 파일 이름(타임스탬프) 생성
         now_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         file_name = f"ocean_data_{now_str}.json"
 
@@ -350,7 +325,6 @@ def upload_to_drive(file_path):
         
         media = MediaFileUpload(file_path, mimetype='application/json')
 
-        # 파일 생성 (내 개인 계정 용량을 쓰므로 용량 초과 에러가 발생하지 않습니다!)
         new_file = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -362,20 +336,17 @@ def upload_to_drive(file_path):
     except Exception as e:
         print(f"❌ [오류] 구글 드라이브 업로드 실패: {e}")
 
+
 if __name__ == "__main__":
-    # 1. 데이터 수집 실행
     collected_data = get_high_resolution_national_ocean_data()
     
-    # 2. 수집된 데이터를 로컬에 임시 JSON 파일로 저장
     temp_file_name = "temp_ocean_data.json"
     with open(temp_file_name, "w", encoding="utf-8") as f:
         json.dump(collected_data, f, ensure_ascii=False, indent=4)
     
     print(f"💾 [로컬] 임시 파일 저장 완료: {temp_file_name}")
     
-    # 3. 구글 드라이브로 업로드 실행
     upload_to_drive(temp_file_name)
     
-    # 4. 업로드가 끝난 뒤 로컬에 남은 임시 파일 삭제 (선택사항)
     if os.path.exists(temp_file_name):
         os.remove(temp_file_name)
