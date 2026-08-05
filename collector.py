@@ -71,7 +71,7 @@ def fetch_open_meteo_wind_vector(lat, lon):
     )
     
     max_retries = 3
-    backoff_delays = [1, 2]  # 1회 실패 후 1초, 2회 실패 후 2초
+    backoff_delays = [1, 2]
 
     for attempt in range(max_retries):
         try:
@@ -389,6 +389,56 @@ def get_high_resolution_national_ocean_data():
     }
 
 
+def upload_to_google_drive(file_path, file_name):
+    """생성된 JSON 파일을 Google Drive 지정 폴더에 업로드"""
+    print("\n==================================================")
+    print("☁️ [Google Drive] 파일 업로드 프로세스 시작...")
+    print("==================================================")
+    
+    folder_id = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+    if not folder_id:
+        print("❌ [오류] GOOGLE_DRIVE_FOLDER_ID 환경변수가 설정되지 않았습니다.")
+        return False
+
+    try:
+        creds = None
+        if os.path.exists("token.json"):
+            creds = Credentials.from_authorized_user_file("token.json", ["https://www.googleapis.com/auth/drive.file"])
+        else:
+            token_json_str = os.environ.get("GOOGLE_TOKEN_JSON")
+            if token_json_str:
+                import json as js
+                creds_data = js.loads(token_json_str)
+                creds = Credentials.from_authorized_user_info(creds_data, ["https://www.googleapis.com/auth/drive.file"])
+            else:
+                from google.auth import default
+                creds, _ = default(scopes=["https://www.googleapis.com/auth/drive.file"])
+
+        service = build("drive", "v3", credentials=creds)
+
+        file_metadata = {
+            "name": file_name,
+            "parents": [folder_id]
+        }
+        media = MediaFileUpload(file_path, mimetype="application/json", resumable=True)
+
+        print(f"  - 업로드 파일명: {file_name}")
+        print(f"  - 타겟 폴더 ID: {folder_id}")
+
+        file = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id"
+        ).execute()
+
+        print(f"✅ [성공] Google Drive 업로드 완료! (File ID: {file.get('id')})")
+        return True
+
+    except Exception as e:
+        print(f"❌ [오류] Google Drive 업로드 실패: {e}")
+        return False
+
+
 def run_self_validation(collected_data):
     """요청된 6가지 자체 검증 항목 수행"""
     print("\n==================================================")
@@ -412,27 +462,22 @@ def run_self_validation(collected_data):
         w_drift = props.get("wind_drift_cms")
         v_status = props.get("total_vector_status")
         
-        # 1. VALID인데 wind_u/v가 null인지
         if status == "VALID" and (w_u is None or w_v is None):
             valid_null_wind_u_v += 1
             
-        # 2. MISSING인데 wind_u/v가 존재하는지
         if status == "MISSING" and (w_u is not None or w_v is not None):
             missing_has_wind_u_v += 1
             
-        # 3. wind_drift_cms 공식 검증 (wind_speed_ms × 0.03 × 100) - VALID 전용, 허용 오차 0.5 cm/s
         if status == "VALID" and w_speed is not None and w_drift is not None:
             expected_drift = round(w_speed * 0.03 * 100.0, 1)
             if abs(w_drift - expected_drift) > 0.5:
                 drift_formula_errors += 1
                 
-        # 4. total_vector_status와 wind_data_status 일치 여부
         if status == "VALID" and v_status != "VALID":
             vector_status_mismatch += 1
         if status == "MISSING" and v_status != "WIND_MISSING":
             vector_status_mismatch += 1
 
-    # 5. 결측률 계산 검증
     total_cnt = metadata.get("wind_total_count", 0)
     valid_cnt = metadata.get("wind_valid_count", 0)
     missing_cnt = metadata.get("wind_missing_count", 0)
@@ -452,8 +497,10 @@ def run_self_validation(collected_data):
     total_errors = valid_null_wind_u_v + missing_has_wind_u_v + drift_formula_errors + vector_status_mismatch + (1 if rate_error else 0)
     if total_errors == 0:
         print("✅ [성공] 모든 자체 검증 항목을 완벽하게 통과했습니다!")
+        return True
     else:
         print(f"❌ [경고] 총 {total_errors}개의 검증 오류가 발견되었습니다.")
+        return False
 
 
 if __name__ == "__main__":
@@ -466,10 +513,22 @@ if __name__ == "__main__":
     else:
         print("\n⚠️ [검증 결과] 수집된 Feature가 없습니다.")
 
-    run_self_validation(collected_data)
+    is_valid = run_self_validation(collected_data)
 
-    temp_file_name = "temp_ocean_data.json"
+    timestamp_str = collected_data.get("metadata", {}).get("timestamp", "")
+    try:
+        dt_obj = datetime.fromisoformat(timestamp_str)
+        file_date_str = dt_obj.strftime("%Y%m%d_%H%M")
+    except Exception:
+        file_date_str = datetime.now(KST).strftime("%Y%m%d_%H%M")
+
+    temp_file_name = f"ocean_data_{file_date_str}.json"
     with open(temp_file_name, "w", encoding="utf-8") as f:
         json.dump(collected_data, f, ensure_ascii=False, indent=4)
     
     print(f"\n💾 [로컬] 임시 파일 저장 완료: {temp_file_name}")
+
+    if is_valid:
+        upload_to_google_drive(temp_file_name, temp_file_name)
+    else:
+        print("❌ [중단] 자체 검증(Self-Validation)을 통과하지 못하여 Google Drive 업로드가 취소되었습니다.")
